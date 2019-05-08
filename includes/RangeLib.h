@@ -75,7 +75,7 @@ Useful Links: https://github.com/MRPT/mrpt/blob/4137046479222f3a71b5c00aee1d5fa8
 #define _GIANT_LUT_SHORT_DATATYPE 1
 
 // these flags determine whether to compile helper functions specially designed for 6.141 lab 5
-#define ROS_WORLD_TO_GRID_CONVERSION 1
+#define ROS_WORLD_TO_GRID_CONVERSION 0
 #define SENSOR_MODEL_HELPERS 1
 
 // slow unoptimized version 
@@ -407,6 +407,7 @@ namespace ranges {
 		int memory() {
 			return width*height*sizeof(float);
 		}
+
 	};
 
 	class RangeMethod
@@ -474,6 +475,7 @@ namespace ranges {
 
 				outs[i] = calc_range(y, x, theta) * world_scale;
 				#else
+
 				outs[i] = calc_range(ins[i*3], ins[i*3+1], ins[i*3+2]);
 				#endif
 			}
@@ -499,7 +501,6 @@ namespace ranges {
 			float y;
 			float temp;
 			float theta;
-			#endif
 
 			for (int i = 0; i < num_particles; ++i)
 			{
@@ -517,6 +518,7 @@ namespace ranges {
 				for (int a = 0; a < num_angles; ++a)
 					outs[i*num_angles+a] = calc_range(y, x, theta - angles[a]) * world_scale;
 			}
+			#endif
 		}
 
 		#if SENSOR_MODEL_HELPERS == 1
@@ -531,6 +533,7 @@ namespace ranges {
 			}
 		}
 		void eval_sensor_model(float * obs, float * ranges, double * outs, int rays_per_particle, int particles) {
+      #if ROS_WORLD_TO_GRID_CONVERSION == 1
 			float inv_world_scale = 1.0 / map.world_scale;
 			// do no allocations in the main loop
 			double weight;
@@ -552,6 +555,7 @@ namespace ranges {
 				}
 				outs[i] = weight;
 			}
+#endif
 		}
 
 		// calc range for each pose, adding every angle, evaluating the sensor model
@@ -961,7 +965,28 @@ namespace ranges {
 			return max_range; 
 		}
 
+    void get_dist_image(float * outs, int shape_i, int shape_j) {
+      std::vector<std::vector<float> > grid = distImage.grid;
+      unsigned width = distImage.width;
+      unsigned height = distImage.height;
+      
+
+      if ( width != shape_i || height != shape_j ) {
+        std::cout << std::endl;
+        std::cout << "numpy:    " << shape_i << " " << shape_j << std::endl;
+        std::cout << "distImage:" << width << " " << height << std::endl;
+        throw std::string("Mismatch in widths of numpy and distImage");
+      }
+			for (int i = 0; i < width; ++i) {
+        for (int j = 0; j < height; ++j) {
+          outs[i*shape_j + j] = grid[i][j];
+        }
+			}
+		}
+
 		int memory() { return distImage.memory(); }
+
+
 	protected:
 		DistanceTransform distImage;
 		float distThreshold = 0.0;

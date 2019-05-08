@@ -5,10 +5,6 @@ import numpy as np
 cimport numpy as np
 from cython.operator cimport dereference as deref
 
-USE_ROS_MAP = True
-if USE_ROS_MAP:
-    from nav_msgs.msg import OccupancyGrid
-    import tf.transformations
 
 cdef extern from "includes/RangeLib.h":
     # define flags
@@ -34,13 +30,6 @@ cdef extern from "includes/RangeLib.h" namespace "ranges":
         bool error()
         bool get(int x, int y)
 
-        # constants for coordinate space conversion
-        float world_scale 
-        float world_angle
-        float world_origin_x
-        float world_origin_y
-        float world_sin_angle
-        float world_cos_angle
 
     cdef cppclass BresenhamsLine:
         BresenhamsLine(OMap m, float mr)
@@ -60,6 +49,7 @@ cdef extern from "includes/RangeLib.h" namespace "ranges":
         void set_sensor_model(double * table, int width)
         void numpy_calc_range_angles(float * ins, float * angles, float * outs, int num_casts, int num_angles)
         void calc_range_repeat_angles_eval_sensor_model(float * ins, float * angles, float * obs, double * weights, int num_particles, int num_angles)
+        void get_dist_image(float * outs, int width, int height)
     cdef cppclass CDDTCast:
         CDDTCast(OMap m, float mr, unsigned int td)
         float calc_range(float x, float y, float heading)
@@ -119,13 +109,6 @@ PyOMap: wraps OMap class
 
 '''
 
-def quaternion_to_angle(q):
-    """Convert a quaternion _message_ into an angle in radians.
-    The angle represents the yaw.
-    This is not just the z component of the quaternion."""
-    x, y, z, w = q.x, q.y, q.z, q.w
-    roll, pitch, yaw = tf.transformations.euler_from_quaternion((x, y, z, w))
-    return yaw
 
 cdef class PyOMap:
     cdef OMap *thisptr      # hold a C++ instance which we're wrapping
@@ -138,46 +121,19 @@ cdef class PyOMap:
                 self.thisptr = new OMap(<string>arg1,<float>arg2)
         elif arg1 is not None:
             if isinstance(arg1, np.ndarray):
+                if not arg1.flags.c_contiguous:
+                    raise ValueError("ndarray expected to be C contiguous")
                 height, width = arg1.shape
-                self.thisptr = new OMap(<int>height,<int>width)
-                for y in xrange(height):
-                    for x in xrange(width):
+                self.thisptr = new OMap(<int>width,<int>height)
+                for y in range(height):
+                    for x in range(width):
                         self.thisptr.grid[x][y] = <bool>arg1[y,x]
-            elif USE_ROS_MAP and isinstance(arg1, OccupancyGrid):
-                map_msg = arg1
-                width, height = map_msg.info.width, map_msg.info.height
-                self.thisptr = new OMap(<int>height,<int>width)
-
-                # 0: permissible, -1: unmapped, 100: blocked
-                array_255 = np.array(map_msg.data).reshape((height, width))
-
-                for x in xrange(height):
-                    for y in xrange(width):
-                        if array_255[x,y] > 10:
-                            self.thisptr.grid[x][y] = True
-
-                # cache constants for coordinate space conversion
-                angle = -1.0*quaternion_to_angle(map_msg.info.origin.orientation)
-                self.thisptr.world_scale = map_msg.info.resolution
-                self.thisptr.world_angle = angle
-                self.thisptr.world_origin_x = map_msg.info.origin.position.x
-                self.thisptr.world_origin_y = map_msg.info.origin.position.y
-                self.thisptr.world_sin_angle = np.sin(angle)
-                self.thisptr.world_cos_angle = np.cos(angle)
-                set_trans_params = True
             else:
                 self.thisptr = new OMap(arg1)
         else:
             print "Failed to construct PyOMap, check argument types."
             self.thisptr = new OMap(1,1)
 
-        if not set_trans_params:
-            self.thisptr.world_scale = 1.0
-            self.thisptr.world_angle = 0.0
-            self.thisptr.world_origin_x = 0.0
-            self.thisptr.world_origin_y = 0.0
-            self.thisptr.world_sin_angle = 0.0
-            self.thisptr.world_cos_angle = 1.0
 
     def __dealloc__(self):
         del self.thisptr
@@ -233,6 +189,9 @@ cdef class PyRayMarching:
     cpdef float calc_range(self, float x, float y, float heading):
         return self.thisptr.calc_range(x, y, heading)
     cpdef void calc_range_many(self,np.ndarray[float, ndim=2, mode="c"] ins, np.ndarray[float, ndim=1, mode="c"] outs):
+        if outs.shape[0] != ins.shape[1]:
+#            raise ValueError("in and out array must have same first dimension")
+            pass
         self.thisptr.numpy_calc_range(&ins[0,0], &outs[0], outs.shape[0])
     cpdef float saveTrace(self, string path):
         self.thisptr.saveTrace(path)
@@ -249,6 +208,9 @@ cdef class PyRayMarching:
             print "Sensor model must have equal matrix dimensions, failing!"
             return
         self.thisptr.set_sensor_model(&table[0,0], table.shape[0])
+
+    cpdef void get_dist(self, np.ndarray[float, ndim=2, mode="c"] distImage):
+        self.thisptr.get_dist_image(&distImage[0,0], distImage.shape[0], distImage.shape[1])
 
 cdef class PyCDDTCast:
     cdef CDDTCast *thisptr      # hold a C++ instance which we're wrapping

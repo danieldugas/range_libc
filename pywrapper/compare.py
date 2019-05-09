@@ -59,6 +59,18 @@ tic =timer()
 rm_ranges = np.array(list(map(lambda x: obj.calc_range(*x), test_states)))
 toc = timer()
 print("rm raytrace: {}s".format(toc-tic))
+obj = rm
+tic =timer()
+vals = np.zeros((len(angles), 3))
+rmnp_ranges = np.zeros_like(ranges, dtype=np.float32)
+vals[:, 0] = lidar_pos_ij[0]
+vals[:, 1] = lidar_pos_ij[1]
+vals[:, 2] = angles
+vals = vals.astype(np.float32)
+rm.calc_range_many(vals, rmnp_ranges)
+# rm_ranges = np.array(list(map(lambda x: obj.calc_range(*x), test_states)))
+toc = timer()
+print("rm GPU raytrace: {}s".format(toc-tic))
 obj = rmgpu
 tic =timer()
 vals = np.zeros((len(angles), 3))
@@ -67,7 +79,7 @@ vals[:, 0] = lidar_pos_ij[0]
 vals[:, 1] = lidar_pos_ij[1]
 vals[:, 2] = angles
 vals = vals.astype(np.float32)
-rm.calc_range_many(vals, rmgpu_ranges)
+obj.calc_range_many(vals, rmgpu_ranges)
 # rm_ranges = np.array(list(map(lambda x: obj.calc_range(*x), test_states)))
 toc = timer()
 print("rm GPU raytrace: {}s".format(toc-tic))
@@ -89,5 +101,6 @@ print("render agents: {}s".format(toc-tic))
 from matplotlib import pyplot as plt
 plt.plot(ranges)
 plt.plot(rm_ranges * map2d.resolution)
+plt.plot(rmnp_ranges * map2d.resolution)
 plt.plot(rmgpu_ranges * map2d.resolution)
 plt.show()

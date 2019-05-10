@@ -397,16 +397,16 @@ cdef class CMap2D:
             if cagent.type != "legs":
                 raise NotImplementedError
             left_leg_pose2d_in_map_frame, right_leg_pose2d_in_map_frame = cagent.cget_legs_pose2d_in_map()
-            llc_ij = self.cxy_to_ij(left_leg_pose2d_in_map_frame[:2])
-            rlc_ij = self.cxy_to_ij(right_leg_pose2d_in_map_frame[:2])
+            llc_ij = self.cxy_to_ij(left_leg_pose2d_in_map_frame[:1,:2])
+            rlc_ij = self.cxy_to_ij(right_leg_pose2d_in_map_frame[:1, :2])
             leg_radius_ij = cagent.leg_radius / self.resolution_
             # circle centers in 'lidar' frame (frame centered at lidar pos, but not rotated,
             # as angles in array are already rotated according to sensor angle in map frame)
-            centers_i[1+2*n] = llc_ij[0] - lidar_ij[0]
-            centers_j[1+2*n] = llc_ij[1] - lidar_ij[1]
+            centers_i[1+2*n] = llc_ij[0, 0] - lidar_ij[0]
+            centers_j[1+2*n] = llc_ij[0, 1] - lidar_ij[1]
             radii_ij[1+2*n] = leg_radius_ij
-            centers_i[1+2*n+1] = rlc_ij[0] - lidar_ij[0]
-            centers_j[1+2*n+1] = rlc_ij[1] - lidar_ij[1]
+            centers_i[1+2*n+1] = rlc_ij[0, 0] - lidar_ij[0]
+            centers_j[1+2*n+1] = rlc_ij[0, 1] - lidar_ij[1]
             radii_ij[1+2*n+1] = leg_radius_ij
         # switch to polar coordinate to find intersection between each ray and agent (circles)
         centers_r_sq = centers_i**2 + centers_j**2
@@ -518,14 +518,14 @@ cdef class CSimAgent:
                 self.state[1] * 2. / leg_side_amplitude
                 + self.state[2]
                 )
-        right_leg_pose2d_in_agent_frame = np.array([
-            front_travel,
-            side_travel + leg_side_offset,
-            0])
+        right_leg_pose2d_in_agent_frame = np.zeros((1,3), dtype=np.float32)
+        right_leg_pose2d_in_agent_frame[0, 0] = front_travel
+        right_leg_pose2d_in_agent_frame[0, 1] = side_travel + leg_side_offset
+        right_leg_pose2d_in_agent_frame[0, 2] = 0
         left_leg_pose2d_in_agent_frame =  -right_leg_pose2d_in_agent_frame
-        left_leg_pose2d_in_map_frame = pose2d.apply_tf_to_pose(
+        left_leg_pose2d_in_map_frame = apply_tf_to_pose(
                 left_leg_pose2d_in_agent_frame, m_a_T)
-        right_leg_pose2d_in_map_frame = pose2d.apply_tf_to_pose(
+        right_leg_pose2d_in_map_frame = apply_tf_to_pose(
                 right_leg_pose2d_in_agent_frame, m_a_T)
         return left_leg_pose2d_in_map_frame, right_leg_pose2d_in_map_frame
 
@@ -551,11 +551,18 @@ cdef class CSimAgent:
                 side_travel + leg_side_offset,
                 0])
             left_leg_pose2d_in_agent_frame =  -right_leg_pose2d_in_agent_frame
-            left_leg_pose2d_in_map_frame = pose2d.apply_tf_to_pose(
+            left_leg_pose2d_in_map_frame = apply_tf_to_pose(
                     left_leg_pose2d_in_agent_frame, m_a_T)
-            right_leg_pose2d_in_map_frame = pose2d.apply_tf_to_pose(
+            right_leg_pose2d_in_map_frame = apply_tf_to_pose(
                     right_leg_pose2d_in_agent_frame, m_a_T)
             return left_leg_pose2d_in_map_frame, right_leg_pose2d_in_map_frame
         else:
             raise NotImplementedError
 
+cdef apply_tf_to_pose(np.ndarray[np.float32_t, ndim=2, mode='c'] pose, np.float32_t[:] pose2d):
+    result = np.zeros((1,3), dtype=np.float32)
+    th = pose2d[2]
+    result[0, 0] = np.cos(th) * pose[0, 0] - np.sin(th) * pose[0, 1] + pose2d[0]
+    result[0, 1] = np.sin(th) * pose[0, 0] + np.cos(th) * pose[0, 1] + pose2d[1]
+    result[0, 2] = pose[0, 2] + th
+    return result

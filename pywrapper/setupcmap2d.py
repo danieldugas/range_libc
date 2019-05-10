@@ -4,6 +4,7 @@ import os
 
 
 setup(
-    ext_modules = cythonize("CMap2D.pyx", annotate=True)
+    ext_modules = cythonize("CMap2D.pyx", annotate=True),
+    name="CMap2D",
 )
 

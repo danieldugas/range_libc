@@ -15,6 +15,8 @@ import os
 from yaml import load
 from matplotlib.pyplot import imread
 
+import pose2d
+
 cdef class CMap2D:
     cdef public np.float32_t[:,::1] occupancy_ # [:, ::1] means 2d c-contiguous
     cdef int occupancy_shape0
@@ -24,7 +26,7 @@ cdef class CMap2D:
     cdef float thresh_free
     cdef float HUGE_
     cdef public np.float32_t[:] origin
-    def __cinit__(self, folder=None, name=None):
+    def __init__(self, folder=None, name=None):
         self.occupancy_ = np.ones((100, 100), dtype=np.float32) * 0.5
         self.occupancy_shape0 = 100
         self.occupancy_shape1 = 100
@@ -73,31 +75,46 @@ cdef class CMap2D:
         return res
 
     def as_occupied_points_ij(self):
-        return np.array(np.where(self.occupancy() > self.thresh_occupied())).T
+        return np.ascontiguousarray(np.array(np.where(self.occupancy() > self.thresh_occupied())).T)
 
-    def as_tsdf(self, max_dist_m):
-        max_dist_ij = max_dist_m / self.resolution_
-        occupied_points_ij = self.as_occupied_points_ij()
-        min_distances = np.ones((self.occupancy_shape0, self.occupancy_shape1)) * max_dist_ij
-        init = min_distances
+    cdef cas_tsdf(self, np.float32_t max_dist_m, np.int64_t[:,::1] occupied_points_ij, np.float32_t[:, ::1] min_distances):
+        """ everything in ij units """
+        cdef np.int64_t max_dist_ij = np.int64((max_dist_m / self.resolution_))
+        cdef np.int64_t[:] point
+        cdef np.int64_t pi
+        cdef np.int64_t pj
+        cdef np.float32_t norm
+        cdef np.int64_t i
+        cdef np.int64_t j 
+        cdef np.int64_t iend
+        cdef np.int64_t jend 
+
         for k in range(len(occupied_points_ij)):
             point = occupied_points_ij[k]
             pi = point[0]
             pj = point[1]
-            irange = range(
-                max(pi - max_dist_ij, 0), min(pi + max_dist_ij, init.shape[0] - 1)
-            )
-            jrange = range(
-                max(pj - max_dist_ij, 0), min(pj + max_dist_ij, init.shape[1] - 1)
-            )
-            for i in irange:
-                for j in jrange:
+            i = max(pi - max_dist_ij, 0)
+            iend = min(pi + max_dist_ij, min_distances.shape[0] - 1)
+            j = max(pj - max_dist_ij, 0)
+            jend = min(pj + max_dist_ij, min_distances.shape[1] - 1)
+            while True:
+                j = max(pj - max_dist_ij, 0)
+                while True:
                     norm = sqrt((pi - i) ** 2 + (pj - j) ** 2)
-                    if norm < init[i, j]:
-                        init[i, j] = norm
-        min_distances = init
+                    if norm < min_distances[i, j]:
+                        min_distances[i, j] = norm
+                    j = j+1
+                    if j >= jend: break
+                i = i+1
+                if i >= iend: break
+
+    def as_tsdf(self, max_dist_m):
+        occupied_points_ij = self.as_occupied_points_ij()
+        max_dist_ij = (max_dist_m / self.resolution_)
+        min_distances_ij = np.ones((self.occupancy_shape0, self.occupancy_shape1), dtype=np.float32) * max_dist_ij
+        self.cas_tsdf(max_dist_m, occupied_points_ij, min_distances_ij)
         # Change from i, j units to x, y units [meters]
-        min_distances = min_distances * self.resolution_
+        min_distances = min_distances_ij * self.resolution_
         # Switch sign for occupied and unkown points (*signed* distance field)
         min_distances[self.occupancy() > self.thresh_free] *= -1.
         return min_distances
@@ -248,7 +265,7 @@ cdef class CMap2D:
         )
 
     def occupancy(self):
-        occ = np.zeros((self.occupancy_shape0, self.occupancy_shape1), dtype=np.float32)
+        occ = np.array(self.occupancy_)
         return occ
 
     def occupancy_T(self):
@@ -429,7 +446,8 @@ cdef class CMap2D:
         ranges[:] = final_ranges
 
     def render_agents_in_lidar(self, ranges, angles, agents, lidar_ij):
-        if not self.crender_agents_in_lidar(ranges, angles, agents, lidar_ij):
+        if not self.crender_agents_in_lidar(ranges.astype(np.float32), angles.astype(np.float32), agents, lidar_ij.astype(np.float32)):
+            print("in rendering agents, object too close for efficient solution")
             self.old_render_agents_in_lidar(ranges, angles, agents, lidar_ij)
 
     @cython.boundscheck(False)
@@ -445,7 +463,7 @@ cdef class CMap2D:
         """ Takes a list of agents (shapes + position) and renders them into the occupancy grid
         assumes the angles are ordered from lowest to highest, spaced evenly (const increment)
         """
-        cdef int n_centers = 1+ 2*len(agents)
+        cdef int n_centers = 2*len(agents)
         cdef np.float32_t[:] centers_i = np.zeros((n_centers,), dtype=np.float32)
         cdef np.float32_t[:] centers_j = np.zeros((n_centers,), dtype=np.float32)
         cdef np.float32_t[:] radii_ij = np.zeros((n_centers,), dtype=np.float32)
@@ -469,8 +487,8 @@ cdef class CMap2D:
             leg_radius_ij = cagent.leg_radius / self.resolution_
             # circle centers in 'lidar' frame (frame centered at lidar pos, but not rotated,
             # as angles in array are already rotated according to sensor angle in map frame)
-            i1 = 1+2*n # even index, for left leg
-            i2 = 1+2*n+1 # odd index for right leg
+            i1 = 2*n # even index, for left leg
+            i2 = 2*n+1 # odd index for right leg
             centers_i[i1] = llc_ij[0, 0] - lidar_ij[0]
             centers_j[i1] = llc_ij[0, 1] - lidar_ij[1]
             radii_ij[i1] = leg_radius_ij
@@ -520,6 +538,8 @@ cdef class CMap2D:
         cdef np.float32_t min_solution
         cdef np.float32_t possible_solution
         cdef np.float32_t possible_solution_m
+        cdef int indexmin
+        cdef int indexmax
         for i in range(n_centers):
             r0sq = centers_r_sq[i]
             r0 = np.sqrt(r0sq)
@@ -538,8 +558,8 @@ cdef class CMap2D:
             if phimax < angle_min or phimin > angle_max:
                 continue
             # find the index for the first visible circle point in the scan
-            indexmin = ( max(phimin, angle_min) - angle_min ) // angle_inc
-            indexmax = ( min(phimax, angle_max) - angle_min ) // angle_inc
+            indexmin = int( ( max(phimin, angle_min) - angle_min ) // angle_inc )
+            indexmax = int( ( min(phimax, angle_max) - angle_min ) // angle_inc )
             for idx in range(indexmin, indexmax+1):
                 phi = angles[idx]
                 first_term = r0 * np.cos(phi - lmbda)
@@ -633,9 +653,9 @@ cdef class CSimAgent:
                 side_travel + leg_side_offset,
                 0])
             left_leg_pose2d_in_agent_frame =  -right_leg_pose2d_in_agent_frame
-            left_leg_pose2d_in_map_frame = apply_tf_to_pose(
+            left_leg_pose2d_in_map_frame = pose2d.apply_tf_to_pose(
                     left_leg_pose2d_in_agent_frame, m_a_T)
-            right_leg_pose2d_in_map_frame = apply_tf_to_pose(
+            right_leg_pose2d_in_map_frame = pose2d.apply_tf_to_pose(
                     right_leg_pose2d_in_agent_frame, m_a_T)
             return left_leg_pose2d_in_map_frame, right_leg_pose2d_in_map_frame
         else:
@@ -644,17 +664,10 @@ cdef class CSimAgent:
 @cython.boundscheck(False)
 @cython.wraparound(False)
 @cython.nonecheck(False)
-cdef capply_tf_to_pose(np.ndarray[np.float32_t, ndim=2, mode='c'] pose, np.float32_t[:] pose2d,
+cdef capply_tf_to_pose(np.float32_t[:, ::1] pose, np.float32_t[:] pose2d,
     np.float32_t[:, ::1] result):
     cdef np.float32_t th = pose2d[2]
     result[0, 0] = ccos(th) * pose[0, 0] - csin(th) * pose[0, 1] + pose2d[0]
     result[0, 1] = csin(th) * pose[0, 0] + ccos(th) * pose[0, 1] + pose2d[1]
     result[0, 2] = pose[0, 2] + th
 
-def apply_tf_to_pose(pose, pose2d):
-    result = np.zeros((1,3), dtype=np.float32)
-    th = pose2d[2]
-    result[0, 0] = np.cos(th) * pose[0, 0] - np.sin(th) * pose[0, 1] + pose2d[0]
-    result[0, 1] = np.sin(th) * pose[0, 0] + np.cos(th) * pose[0, 1] + pose2d[1]
-    result[0, 2] = pose[0, 2] + th
-    return result

@@ -446,7 +446,7 @@ cdef class CMap2D:
         ranges[:] = final_ranges
 
     def render_agents_in_lidar(self, ranges, angles, agents, lidar_ij):
-        if not self.crender_agents_in_lidar(ranges.astype(np.float32), angles.astype(np.float32), agents, lidar_ij.astype(np.float32)):
+        if not self.crender_agents_in_lidar(ranges, angles.astype(np.float32), agents, lidar_ij.astype(np.float32)):
             print("in rendering agents, object too close for efficient solution")
             self.old_render_agents_in_lidar(ranges, angles, agents, lidar_ij)
 

@@ -6,8 +6,10 @@ from libcpp.vector cimport vector
 import numpy as np
 cimport numpy as np
 from cython.operator cimport dereference as deref
-import cython
+cimport cython
 from math import sqrt
+from libc.math cimport cos as ccos
+from libc.math cimport sin as csin
 
 import os
 from yaml import load
@@ -71,11 +73,11 @@ cdef class CMap2D:
         return res
 
     def as_occupied_points_ij(self):
-        return np.array(np.where(self.occupancy() > self.thresh_occupied_)).T
+        return np.array(np.where(self.occupancy() > self.thresh_occupied())).T
 
     def as_tsdf(self, max_dist_m):
         max_dist_ij = max_dist_m / self.resolution_
-        occupied_points_ij = np.array(self.as_occupied_points_ij())
+        occupied_points_ij = self.as_occupied_points_ij()
         min_distances = np.ones((self.occupancy_shape0, self.occupancy_shape1)) * max_dist_ij
         init = min_distances
         for k in range(len(occupied_points_ij)):
@@ -93,6 +95,7 @@ cdef class CMap2D:
                     norm = sqrt((pi - i) ** 2 + (pj - j) ** 2)
                     if norm < init[i, j]:
                         init[i, j] = norm
+        min_distances = init
         # Change from i, j units to x, y units [meters]
         min_distances = min_distances * self.resolution_
         # Switch sign for occupied and unkown points (*signed* distance field)
@@ -103,13 +106,12 @@ cdef class CMap2D:
     @cython.wraparound(False)
     @cython.nonecheck(False)
     @cython.cdivision(True)
-    cdef cxy_to_ij(self, np.float32_t[:,::1] xy, bool clip_if_outside=True):
+    cdef cxy_to_ij(self, np.float32_t[:,::1] xy, np.float32_t[:,::1] ij, bool clip_if_outside=True):
         if xy.shape[1] != 2:
             raise IndexError("xy should be of shape (n, 2)")
-        ij = np.zeros([xy.shape[0], xy.shape[1]], dtype=np.intc)
         for k in range(xy.shape[0]):
-            ij[k, 0] = <int>((xy[k, 0] - self.origin[0]) / self.resolution_)
-            ij[k, 1] = <int>((xy[k, 1] - self.origin[1]) / self.resolution_)
+            ij[k, 0] = (xy[k, 0] - self.origin[0]) / self.resolution_
+            ij[k, 1] = (xy[k, 1] - self.origin[1]) / self.resolution_
         if clip_if_outside:
             for k in range(xy.shape[0]):
                 if ij[k, 0] >= self.occupancy_shape0:
@@ -380,36 +382,31 @@ cdef class CMap2D:
             open_[current[0], current[1]] = False
         return tentative
 
-
-    def render_agents_in_lidar(self, ranges, angles, agents, lidar_ij):
-        return self.crender_agents_in_lidar(ranges, angles, agents, lidar_ij)
-
-    cdef crender_agents_in_lidar(self, ranges, angles, agents, lidar_ij):
-        """ Takes a list of agents (shapes + position) and renders them into the occupancy grid
-        assumes the angles are ordered from lowest to highest, spaced evenly (const increment)
-        """
-
-        centers_i = np.zeros((1+ 2*len(agents),), dtype=np.float32)
-        centers_j = np.zeros((1+ 2*len(agents),), dtype=np.float32)
-        radii_ij = np.zeros((1+ 2*len(agents),), dtype=np.float32)
-        for n, agent in enumerate(agents):
-            cagent = CSimAgent(agent.pose_2d_in_map_frame, agent.state)
-            if cagent.type != "legs":
+    def old_render_agents_in_lidar(self, ranges, angles, agents, lidar_ij):
+        """ Takes a list of agents (shapes + position) and renders them into the occupancy grid """
+        centers_i = [0]
+        centers_j = [0]
+        radii_ij = [np.inf]
+        for agent in agents:
+            if agent.type != "legs":
                 raise NotImplementedError
-            left_leg_pose2d_in_map_frame, right_leg_pose2d_in_map_frame = cagent.cget_legs_pose2d_in_map()
-            llc_ij = self.cxy_to_ij(left_leg_pose2d_in_map_frame[:1,:2])
-            rlc_ij = self.cxy_to_ij(right_leg_pose2d_in_map_frame[:1, :2])
-            leg_radius_ij = cagent.leg_radius / self.resolution_
+            left_leg_pose2d_in_map_frame, right_leg_pose2d_in_map_frame = agent.get_legs_pose2d_in_map()
+            llc_ij = self.xy_to_ij(left_leg_pose2d_in_map_frame[:2])
+            rlc_ij = self.xy_to_ij(right_leg_pose2d_in_map_frame[:2])
+            leg_radius_ij = agent.leg_radius / self.resolution_
             # circle centers in 'lidar' frame (frame centered at lidar pos, but not rotated,
             # as angles in array are already rotated according to sensor angle in map frame)
-            centers_i[1+2*n] = llc_ij[0, 0] - lidar_ij[0]
-            centers_j[1+2*n] = llc_ij[0, 1] - lidar_ij[1]
-            radii_ij[1+2*n] = leg_radius_ij
-            centers_i[1+2*n+1] = rlc_ij[0, 0] - lidar_ij[0]
-            centers_j[1+2*n+1] = rlc_ij[0, 1] - lidar_ij[1]
-            radii_ij[1+2*n+1] = leg_radius_ij
+            centers_i.append(llc_ij[0] - lidar_ij[0])
+            centers_j.append(llc_ij[1] - lidar_ij[1])
+            radii_ij.append(leg_radius_ij)
+            centers_i.append(rlc_ij[0] - lidar_ij[0])
+            centers_j.append(rlc_ij[1] - lidar_ij[1])
+            radii_ij.append(leg_radius_ij)
         # switch to polar coordinate to find intersection between each ray and agent (circles)
-        centers_r_sq = centers_i**2 + centers_j**2
+        angles = np.array(angles)
+        ranges = np.array(ranges)
+        radii_ij = np.array(radii_ij)
+        centers_r_sq = np.array(centers_i)**2 + np.array(centers_j)**2
         centers_l = np.arctan2(centers_j, centers_i)
         # Circle in polar coord: r^2 - 2*r*r0*cos(phi-lambda) + r0^2 = R^2
         # Solve equation for r at angle phi in polar coordinates, of circle of center (r0, lambda)
@@ -417,73 +414,150 @@ cdef class CMap2D:
         # r = r0*cos(phi-lambda) - sqrt( r0^2*cos^2(phi-lambda) - r0^2 + R^2 )
         # r = r0*cos(phi-lambda) + sqrt( r0^2*cos^2(phi-lambda) - r0^2 + R^2 )
         # solutions are real only if term inside sqrt is > 0
-        if np.any(centers_r_sq == 0) or np.any(centers_r_sq < radii_ij**2):
-            first_term = np.sqrt(centers_r_sq) * np.cos(angles[:,None] - centers_l)
-            sqrt_inner = centers_r_sq * np.cos(angles[:,None] - centers_l)**2 - centers_r_sq + radii_ij**2
-            sqrt_inner[sqrt_inner < 0] = np.inf
-            radii_solutions_a = first_term - np.sqrt(sqrt_inner)
-            radii_solutions_b = first_term + np.sqrt(sqrt_inner)
-            radii_solutions_a[radii_solutions_a < 0] = np.inf
-            radii_solutions_b[radii_solutions_b < 0] = np.inf
-            # range is the smallest range between original range, and intersection range with each agent
-            all_sol = np.hstack([radii_solutions_a, radii_solutions_b])
-            all_sol = all_sol * self.resolution_ # from ij coordinates back to xy
-            all_sol[:,0] = ranges
-            final_ranges = np.min(all_sol, axis=1)
-            ranges[:] = final_ranges
-        else:
+        first_term = np.sqrt(centers_r_sq) * np.cos(angles[:,None] - centers_l)
+        sqrt_inner = centers_r_sq * np.cos(angles[:,None] - centers_l)**2 - centers_r_sq + radii_ij**2
+        sqrt_inner[sqrt_inner < 0] = np.inf
+        radii_solutions_a = first_term - np.sqrt(sqrt_inner)
+        radii_solutions_b = first_term + np.sqrt(sqrt_inner)
+        radii_solutions_a[radii_solutions_a < 0] = np.inf
+        radii_solutions_b[radii_solutions_b < 0] = np.inf
+        # range is the smallest range between original range, and intersection range with each agent
+        all_sol = np.hstack([radii_solutions_a, radii_solutions_b])
+        all_sol = all_sol * self.resolution_ # from ij coordinates back to xy
+        all_sol[:,0] = ranges
+        final_ranges = np.min(all_sol, axis=1)
+        ranges[:] = final_ranges
+
+    def render_agents_in_lidar(self, ranges, angles, agents, lidar_ij):
+        if not self.crender_agents_in_lidar(ranges, angles, agents, lidar_ij):
+            self.old_render_agents_in_lidar(ranges, angles, agents, lidar_ij)
+
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
+    @cython.nonecheck(False)
+    @cython.cdivision(True)
+    cdef crender_agents_in_lidar(self,
+            np.ndarray[np.float32_t, ndim=1] ranges,
+            np.ndarray[np.float32_t, ndim=1] angles,
+            agents,
+            np.ndarray[np.float32_t, ndim=1] lidar_ij,
+            ):
+        """ Takes a list of agents (shapes + position) and renders them into the occupancy grid
+        assumes the angles are ordered from lowest to highest, spaced evenly (const increment)
+        """
+        cdef int n_centers = 1+ 2*len(agents)
+        cdef np.float32_t[:] centers_i = np.zeros((n_centers,), dtype=np.float32)
+        cdef np.float32_t[:] centers_j = np.zeros((n_centers,), dtype=np.float32)
+        cdef np.float32_t[:] radii_ij = np.zeros((n_centers,), dtype=np.float32)
+        cdef np.float32_t[:] centers_r_sq = np.zeros((n_centers,), dtype=np.float32)
+        cdef np.float32_t[:] centers_l = np.zeros((n_centers,), dtype=np.float32)
+        # loop variables
+        cdef CSimAgent cagent
+        cdef np.float32_t[:, ::1] left_leg_pose2d_in_map_frame = np.zeros((1,3), dtype=np.float32)
+        cdef np.float32_t[:, ::1] right_leg_pose2d_in_map_frame = np.zeros((1,3), dtype=np.float32)
+        cdef np.float32_t[:, ::1] llc_ij = np.zeros((1,3), dtype=np.float32)
+        cdef np.float32_t[:, ::1] rlc_ij = np.zeros((1,3), dtype=np.float32)
+        cdef int i1 = 0
+        cdef int i2 = 0
+        cdef np.float32_t leg_radius_ij
+        for n in range(len(agents)):
+            agent = agents[n]
+            cagent = CSimAgent(agent.pose_2d_in_map_frame, agent.state)
+            cagent.cget_legs_pose2d_in_map(left_leg_pose2d_in_map_frame, right_leg_pose2d_in_map_frame)
+            self.cxy_to_ij(left_leg_pose2d_in_map_frame[:1,:2], llc_ij)
+            self.cxy_to_ij(right_leg_pose2d_in_map_frame[:1, :2], rlc_ij)
+            leg_radius_ij = cagent.leg_radius / self.resolution_
+            # circle centers in 'lidar' frame (frame centered at lidar pos, but not rotated,
+            # as angles in array are already rotated according to sensor angle in map frame)
+            i1 = 1+2*n # even index, for left leg
+            i2 = 1+2*n+1 # odd index for right leg
+            centers_i[i1] = llc_ij[0, 0] - lidar_ij[0]
+            centers_j[i1] = llc_ij[0, 1] - lidar_ij[1]
+            radii_ij[i1] = leg_radius_ij
+            centers_i[i2] = rlc_ij[0, 0] - lidar_ij[0]
+            centers_j[i2] = rlc_ij[0, 1] - lidar_ij[1]
+            radii_ij[i2] = leg_radius_ij
+            # switch to polar coordinate to find intersection between each ray and agent (circles)
+            centers_r_sq[i1] = centers_i[i1]**2 + centers_j[i1]**2
+            centers_l[i1] = np.arctan2(centers_j[i1], centers_i[i1])
+            centers_r_sq[i2] = centers_i[i2]**2 + centers_j[i2]**2
+            centers_l[i2] = np.arctan2(centers_j[i2], centers_i[i2])
+        # Circle in polar coord: r^2 - 2*r*r0*cos(phi-lambda) + r0^2 = R^2
+        # Solve equation for r at angle phi in polar coordinates, of circle of center (r0, lambda)
+        # and radius R. -> 2 solutions for r knowing r0, phi, lambda, R: 
+        # r = r0*cos(phi-lambda) - sqrt( r0^2*cos^2(phi-lambda) - r0^2 + R^2 )
+        # r = r0*cos(phi-lambda) + sqrt( r0^2*cos^2(phi-lambda) - r0^2 + R^2 )
+        # solutions are real only if term inside sqrt is > 0
+        for i in range(n_centers):
+            # if an object is too close, this will not be efficient, tell the caller to switch to numpy
+            if centers_r_sq[i] == 0 or centers_r_sq[i] < radii_ij[i]**2:
+                return False
         # we can first check at what angles this holds.
         # there should be two extrema for the circle in phi, which are solutions for:
         # r0^2*cos^2(phi-lambda) - r0^2 + R^2 = 0 
         # the two solutions are:
         # phi = lambda + 2*pi*n +- arccos( +- sqrt(r0^2 - R^2) / r0 )
         # these exist only if r0 > R and r0 != 0
-            angle_min = angles[0]
-            angle_max = angles[len(angles)-1]
-            angle_inc = angles[1] - angle_min
-            if angle_min >= angle_max:
-                raise ValueError("angles expected to be ordered from min to max.")
-            # angle_0_ref is a multiple of 2pi, the closest one smaller than angles[0]
-            # assuming a scan covers less than full circle, all angles in the scan should lie 
-            # between angle_0_ref and angle_0_ref + 2* 2pi (two full circles)
-            angle_0_ref = 2*np.pi * (angle_min // (2*np.pi))
-            for i in range(len(centers_r_sq)):
-                r0sq = centers_r_sq[i]
-                r0 = np.sqrt(r0sq)
-                lmbda = centers_l[i]
-                R = radii_ij[i]
-                phimin = lmbda - np.arccos( np.sqrt(r0sq - R**2) / r0 )
-                phimax = lmbda + np.arccos( np.sqrt(r0sq - R**2) / r0 )
-                #                    this is phi as an angle [0, 2pi]
-                phimin = angle_0_ref + phimin % (np.pi * 2)
-                phimax = angle_0_ref + phimax % (np.pi * 2)
-                # try the second full circle if our agent is outside the scan
-                if phimax < angle_min:
-                    phimin = phimin + np.pi * 2
-                    phimax = phimax + np.pi * 2
-                # if still outside the scan, our agent is not visible
-                if phimax < angle_min or phimin > angle_max:
+        cdef np.float32_t angle_min = angles[0]
+        cdef np.float32_t angle_max = angles[len(angles)-1]
+        cdef np.float32_t angle_inc = angles[1] - angle_min
+        if angle_min >= angle_max:
+            raise ValueError("angles expected to be ordered from min to max.")
+        # angle_0_ref is a multiple of 2pi, the closest one smaller than angles[0]
+        # assuming a scan covers less than full circle, all angles in the scan should lie 
+        # between angle_0_ref and angle_0_ref + 2* 2pi (two full circles)
+        cdef np.float32_t angle_0_ref = 2*np.pi * (angle_min // (2*np.pi))
+        # loop variables
+        cdef np.float32_t r0sq
+        cdef np.float32_t r0
+        cdef np.float32_t lmbda
+        cdef np.float32_t R
+        cdef np.float32_t phimin
+        cdef np.float32_t phimax
+        cdef np.float32_t phi
+        cdef np.float32_t first_term
+        cdef np.float32_t sqrt_inner
+        cdef np.float32_t min_solution
+        cdef np.float32_t possible_solution
+        cdef np.float32_t possible_solution_m
+        for i in range(n_centers):
+            r0sq = centers_r_sq[i]
+            r0 = np.sqrt(r0sq)
+            lmbda = centers_l[i]
+            R = radii_ij[i]
+            phimin = lmbda - np.arccos( np.sqrt(r0sq - R**2) / r0 )
+            phimax = lmbda + np.arccos( np.sqrt(r0sq - R**2) / r0 )
+            #                    this is phi as an angle [0, 2pi]
+            phimin = angle_0_ref + phimin % (np.pi * 2)
+            phimax = angle_0_ref + phimax % (np.pi * 2)
+            # try the second full circle if our agent is outside the scan
+            if phimax < angle_min:
+                phimin = phimin + np.pi * 2
+                phimax = phimax + np.pi * 2
+            # if still outside the scan, our agent is not visible
+            if phimax < angle_min or phimin > angle_max:
+                continue
+            # find the index for the first visible circle point in the scan
+            indexmin = ( max(phimin, angle_min) - angle_min ) // angle_inc
+            indexmax = ( min(phimax, angle_max) - angle_min ) // angle_inc
+            for idx in range(indexmin, indexmax+1):
+                phi = angles[idx]
+                first_term = r0 * np.cos(phi - lmbda)
+                sqrt_inner = r0sq * np.cos(phi - lmbda)**2 - r0sq + R**2
+                if sqrt_inner < 0:
+                    # in this case that ray does not see the agent
                     continue
-                # find the index for the first visible circle point in the scan
-                indexmin = ( max(phimin, angle_min) - angle_min ) // angle_inc
-                indexmax = ( min(phimax, angle_max) - angle_min ) // angle_inc
-                for idx in range(indexmin, indexmax+1):
-                    phi = angles[idx]
-                    first_term = r0 * np.cos(phi - lmbda)
-                    sqrt_inner = r0sq * np.cos(phi - lmbda)**2 - r0sq + R**2
-                    if sqrt_inner < 0:
-                        # in this case that ray does not see the agent
-                        continue
-                    min_solution = ranges[idx] # initialize with scan range
-                    possible_solution = first_term - np.sqrt(sqrt_inner) # in ij units
-                    possible_solution_m = possible_solution * self.resolution_ # in meters
-                    if possible_solution_m >= 0:
-                        min_solution = min(min_solution, possible_solution_m)
-                    possible_solution = first_term + np.sqrt(sqrt_inner)
-                    possible_solution_m = possible_solution * self.resolution_
-                    if possible_solution_m >= 0:
-                        min_solution = min(min_solution, possible_solution_m)
-                    ranges[idx] = min_solution
+                min_solution = ranges[idx] # initialize with scan range
+                possible_solution = first_term - np.sqrt(sqrt_inner) # in ij units
+                possible_solution_m = possible_solution * self.resolution_ # in meters
+                if possible_solution_m >= 0:
+                    min_solution = min(min_solution, possible_solution_m)
+                possible_solution = first_term + np.sqrt(sqrt_inner)
+                possible_solution_m = possible_solution * self.resolution_
+                if possible_solution_m >= 0:
+                    min_solution = min(min_solution, possible_solution_m)
+                ranges[idx] = min_solution
+        return True
 
 import pose2d
 
@@ -500,34 +574,42 @@ cdef class CSimAgent:
         self.leg_radius = 0.03 # [m]
 
 
-    cdef cget_legs_pose2d_in_map(self):
-        m_a_T = self.pose_2d_in_map_frame
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
+    @cython.nonecheck(False)
+    @cython.cdivision(True)
+    cdef cget_legs_pose2d_in_map(self,
+            np.float32_t[:, ::1] left_leg_pose2d_in_map_frame, 
+            np.float32_t[:, ::1] right_leg_pose2d_in_map_frame):
         if self.type != "legs":
             raise NotImplementedError
-        leg_radius = self.leg_radius # [m]
-        leg_side_offset = 0.1 # [m]
-        leg_side_amplitude = 0.1 # [m] half amplitude
-        leg_front_amplitude = 0.3 # [m]
+        cdef np.float32_t[:] m_a_T = self.pose_2d_in_map_frame
+        cdef np.float32_t leg_radius = self.leg_radius # [m]
+        cdef np.float32_t leg_side_offset = 0.1 # [m]
+        cdef np.float32_t leg_side_amplitude = 0.1 # [m] half amplitude
+        cdef np.float32_t leg_front_amplitude = 0.3 # [m]
         # get position of each leg w.r.t agent (x is 'forward')
         # travel is a sine function relative to how fast the agent is moving in x y
-        front_travel =  leg_front_amplitude * np.cos(
+        cdef np.float32_t front_travel =  leg_front_amplitude * ccos(
                 self.state[0] * 2. / leg_front_amplitude # assuming dx = 2 dphi / A
                 + self.state[2] # adds a little movement when rotating
                 )
-        side_travel =  leg_side_amplitude * np.cos(
+        cdef np.float32_t side_travel =  leg_side_amplitude * ccos(
                 self.state[1] * 2. / leg_side_amplitude
                 + self.state[2]
                 )
-        right_leg_pose2d_in_agent_frame = np.zeros((1,3), dtype=np.float32)
+        cdef np.float32_t[:, ::1] right_leg_pose2d_in_agent_frame = np.zeros((1,3), dtype=np.float32)
         right_leg_pose2d_in_agent_frame[0, 0] = front_travel
         right_leg_pose2d_in_agent_frame[0, 1] = side_travel + leg_side_offset
         right_leg_pose2d_in_agent_frame[0, 2] = 0
-        left_leg_pose2d_in_agent_frame =  -right_leg_pose2d_in_agent_frame
-        left_leg_pose2d_in_map_frame = apply_tf_to_pose(
-                left_leg_pose2d_in_agent_frame, m_a_T)
-        right_leg_pose2d_in_map_frame = apply_tf_to_pose(
-                right_leg_pose2d_in_agent_frame, m_a_T)
-        return left_leg_pose2d_in_map_frame, right_leg_pose2d_in_map_frame
+        cdef np.float32_t[:, ::1] left_leg_pose2d_in_agent_frame = np.zeros((1,3), dtype=np.float32) 
+        right_leg_pose2d_in_agent_frame[0, 0] = -right_leg_pose2d_in_agent_frame[0, 0]
+        right_leg_pose2d_in_agent_frame[0, 1] = -right_leg_pose2d_in_agent_frame[0, 1]
+        right_leg_pose2d_in_agent_frame[0, 2] = -right_leg_pose2d_in_agent_frame[0, 2]
+        capply_tf_to_pose(
+                left_leg_pose2d_in_agent_frame, m_a_T, left_leg_pose2d_in_map_frame)
+        capply_tf_to_pose(
+                right_leg_pose2d_in_agent_frame, m_a_T, right_leg_pose2d_in_map_frame)
 
     def get_legs_pose2d_in_map(self):
         m_a_T = self.pose_2d_in_map_frame
@@ -559,7 +641,17 @@ cdef class CSimAgent:
         else:
             raise NotImplementedError
 
-cdef apply_tf_to_pose(np.ndarray[np.float32_t, ndim=2, mode='c'] pose, np.float32_t[:] pose2d):
+@cython.boundscheck(False)
+@cython.wraparound(False)
+@cython.nonecheck(False)
+cdef capply_tf_to_pose(np.ndarray[np.float32_t, ndim=2, mode='c'] pose, np.float32_t[:] pose2d,
+    np.float32_t[:, ::1] result):
+    cdef np.float32_t th = pose2d[2]
+    result[0, 0] = ccos(th) * pose[0, 0] - csin(th) * pose[0, 1] + pose2d[0]
+    result[0, 1] = csin(th) * pose[0, 0] + ccos(th) * pose[0, 1] + pose2d[1]
+    result[0, 2] = pose[0, 2] + th
+
+def apply_tf_to_pose(pose, pose2d):
     result = np.zeros((1,3), dtype=np.float32)
     th = pose2d[2]
     result[0, 0] = np.cos(th) * pose[0, 0] - np.sin(th) * pose[0, 1] + pose2d[0]

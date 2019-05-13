@@ -109,14 +109,19 @@ cdef class CMap2D:
                 if i >= iend: break
 
     def as_tsdf(self, max_dist_m):
-        occupied_points_ij = self.as_occupied_points_ij()
-        max_dist_ij = (max_dist_m / self.resolution_)
-        min_distances_ij = np.ones((self.occupancy_shape0, self.occupancy_shape1), dtype=np.float32) * max_dist_ij
-        self.cas_tsdf(max_dist_m, occupied_points_ij, min_distances_ij)
-        # Change from i, j units to x, y units [meters]
-        min_distances = min_distances_ij * self.resolution_
-        # Switch sign for occupied and unkown points (*signed* distance field)
-        min_distances[self.occupancy() > self.thresh_free] *= -1.
+        if False:
+            occupied_points_ij = self.as_occupied_points_ij()
+            max_dist_ij = (max_dist_m / self.resolution_)
+            min_distances_ij = np.ones((self.occupancy_shape0, self.occupancy_shape1), dtype=np.float32) * max_dist_ij
+            self.cas_tsdf(max_dist_m, occupied_points_ij, min_distances_ij)
+            # Change from i, j units to x, y units [meters]
+            min_distances = min_distances_ij * self.resolution_
+            # Switch sign for occupied and unkown points (*signed* distance field)
+            min_distances[self.occupancy() > self.thresh_free] *= -1.
+        # this is faster than the still poorly optimized cas_tsdf
+        min_distances = self.as_sdf()
+        min_distances[min_distances > max_dist_m] = max_dist_m
+        min_distances[min_distances < -max_dist_m] = -max_dist_m
         return min_distances
 
     @cython.boundscheck(False)
@@ -447,7 +452,7 @@ cdef class CMap2D:
 
     def render_agents_in_lidar(self, ranges, angles, agents, lidar_ij):
         if not self.crender_agents_in_lidar(ranges, angles.astype(np.float32), agents, lidar_ij.astype(np.float32)):
-            print("in rendering agents, object too close for efficient solution")
+#             print("in rendering agents, object too close for efficient solution")
             self.old_render_agents_in_lidar(ranges, angles, agents, lidar_ij)
 
     @cython.boundscheck(False)

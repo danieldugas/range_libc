@@ -10,6 +10,8 @@ cimport cython
 from math import sqrt
 from libc.math cimport cos as ccos
 from libc.math cimport sin as csin
+from libc.math cimport acos as cacos
+from libc.math cimport sqrt as csqrt
 
 import os
 from yaml import load
@@ -450,10 +452,178 @@ cdef class CMap2D:
         final_ranges = np.min(all_sol, axis=1)
         ranges[:] = final_ranges
 
-    def render_agents_in_lidar(self, ranges, angles, agents, lidar_ij):
-        if not self.crender_agents_in_lidar(ranges, angles.astype(np.float32), agents, lidar_ij.astype(np.float32)):
+    def render_agents_in_many_lidars(self, ranges, xythetas, agents):
+        self.crender_agents_in_many_lidars(ranges, xythetas, agents)
+
+    def render_agents_in_lidar(self, ranges, angles, agents, lidar_ij, exclude_agent):
+        if not self.crender_agents_in_lidar(ranges, angles.astype(np.float32), agents, lidar_ij.astype(np.float32), exclude_agent):
 #             print("in rendering agents, object too close for efficient solution")
-            self.old_render_agents_in_lidar(ranges, angles, agents, lidar_ij)
+            onelessagents = [a for i, a in enumerate(agents) if i != exclude_agent]
+            self.old_render_agents_in_lidar(ranges, angles, onelessagents, lidar_ij)
+
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
+    @cython.nonecheck(False)
+    @cython.cdivision(True)
+    cdef crender_agents_in_many_lidars(self,
+#             np.float32_t[:,:,::1] ranges,   # agent, points, left / right
+            np.ndarray[np.float32_t, ndim=3, mode='c'] ranges,   # agent, points, left / right
+            np.float32_t[:,:,:,::1] ijthetas, # agent, points, left / right, i j th
+            agents,
+            ):
+        """ Takes a list of agents (shapes + position) and renders them into the occupancy grid
+        assumes the angles are ordered from lowest to highest, spaced evenly (const increment)
+        """
+        cdef np.float32_t PI = np.pi
+        cdef int n_agents = len(agents)
+        cdef int n_angles = ijthetas.shape[1]
+        if n_agents == 0:
+            return True
+        cdef int n_centers = 2* (n_agents - 1) # 2 legs per agent, one less agent (excluded)
+        cdef np.float32_t[:] centers_i = np.zeros((n_centers,), dtype=np.float32)
+        cdef np.float32_t[:] centers_j = np.zeros((n_centers,), dtype=np.float32)
+        cdef np.float32_t[:] radii_ij = np.zeros((n_centers,), dtype=np.float32)
+        cdef np.float32_t[:] centers_r_sq = np.zeros((n_centers,), dtype=np.float32)
+        cdef np.float32_t[:] centers_l = np.zeros((n_centers,), dtype=np.float32)
+        # loop variables
+        cdef CSimAgent cagent
+        cdef np.float32_t[:, ::1] left_leg_pose2d_in_map_frame = np.zeros((1,3), dtype=np.float32)
+        cdef np.float32_t[:, ::1] right_leg_pose2d_in_map_frame = np.zeros((1,3), dtype=np.float32)
+        cdef np.float32_t[:, ::1] llc_ij = np.zeros((1,3), dtype=np.float32)
+        cdef np.float32_t[:, ::1] rlc_ij = np.zeros((1,3), dtype=np.float32)
+        cdef int i1 = 0
+        cdef int i2 = 0
+        cdef np.float32_t leg_radius_ij
+        cdef np.float32_t[:, :, ::1] llcijs = np.zeros((n_agents, 1, 3), dtype=np.float32)
+        cdef np.float32_t[:, :, ::1] rlcijs = np.zeros((n_agents, 1, 3), dtype=np.float32)
+        cdef np.float32_t[:] leg_radii_ijs  = np.zeros((n_agents,), dtype=np.float32)
+        for n in range(n_agents):
+            agent = agents[n]
+            cagent = CSimAgent(agent.pose_2d_in_map_frame, agent.state)
+            cagent.cget_legs_pose2d_in_map(left_leg_pose2d_in_map_frame, right_leg_pose2d_in_map_frame)
+            self.cxy_to_ij(left_leg_pose2d_in_map_frame[:1,:2], llc_ij)
+            self.cxy_to_ij(right_leg_pose2d_in_map_frame[:1, :2], rlc_ij)
+            leg_radii_ijs[n] = cagent.leg_radius / self.resolution_
+            llcijs[n, 0, 0] = llc_ij[0, 0]
+            llcijs[n, 0, 1] = llc_ij[0, 1]
+            llcijs[n, 0, 2] = llc_ij[0, 2]
+            rlcijs[n, 0, 0] = rlc_ij[0, 0]
+            rlcijs[n, 0, 1] = rlc_ij[0, 1]
+            rlcijs[n, 0, 2] = rlc_ij[0, 2]
+        # final calculation cdefs
+        cdef np.float32_t angle_min
+        cdef np.float32_t angle_max
+        cdef np.float32_t angle_inc
+        cdef np.float32_t angle_0_ref
+        cdef np.float32_t r0sq
+        cdef np.float32_t r0
+        cdef np.float32_t lmbda
+        cdef np.float32_t R
+        cdef np.float32_t phimin
+        cdef np.float32_t phimax
+        cdef np.float32_t phi
+        cdef np.float32_t first_term
+        cdef np.float32_t sqrt_inner
+        cdef np.float32_t min_solution
+        cdef np.float32_t possible_solution
+        cdef np.float32_t possible_solution_m
+        cdef int indexmin
+        cdef int indexmax
+        cdef int k
+        cdef bool wholescan = False
+        for a in range(n_agents): # apply to each agent
+            for lr in range(2): # apply to left / right lidar
+                # apply render agents to single lidar scan
+                k = 0
+                for n in range(n_agents):
+                    if n == a:
+                        continue
+                    leg_radius_ij = leg_radii_ijs[k]
+                    llc_ij[0, 0] = llcijs[k, 0, 0]
+                    llc_ij[0, 1] = llcijs[k, 0, 1]
+                    llc_ij[0, 2] = llcijs[k, 0, 2]
+                    rlc_ij[0, 0] = rlcijs[k, 0, 0]
+                    rlc_ij[0, 1] = rlcijs[k, 0, 1]
+                    rlc_ij[0, 2] = rlcijs[k, 0, 2]
+                    # circle centers in 'lidar' frame (frame centered at lidar pos, but not rotated,
+                    # as angles in array are already rotated according to sensor angle in map frame)
+                    i1 = 2*k # even index, for left leg
+                    i2 = 2*k+1 # odd index for right leg
+                    centers_i[i1] = llc_ij[0, 0] - ijthetas[a, 0, lr, 0]
+                    centers_j[i1] = llc_ij[0, 1] - ijthetas[a, 0, lr, 1]
+                    radii_ij[i1] = leg_radius_ij
+                    centers_i[i2] = rlc_ij[0, 0] - ijthetas[a, 0, lr, 0]
+                    centers_j[i2] = rlc_ij[0, 1] - ijthetas[a, 0, lr, 1]
+                    radii_ij[i2] = leg_radius_ij
+                    # switch to polar coordinate to find intersection between each ray and agent (circles)
+                    centers_r_sq[i1] = centers_i[i1]**2 + centers_j[i1]**2
+                    centers_l[i1] = np.arctan2(centers_j[i1], centers_i[i1])
+                    centers_r_sq[i2] = centers_i[i2]**2 + centers_j[i2]**2
+                    centers_l[i2] = np.arctan2(centers_j[i2], centers_i[i2])
+                    k += 1
+                # Circle in polar coord: r^2 - 2*r*r0*cos(phi-lambda) + r0^2 = R^2
+                # Solve equation for r at angle phi in polar coordinates, of circle of center (r0, lambda)
+                # and radius R. -> 2 solutions for r knowing r0, phi, lambda, R: 
+                # r = r0*cos(phi-lambda) - sqrt( r0^2*cos^2(phi-lambda) - r0^2 + R^2 )
+                # r = r0*cos(phi-lambda) + sqrt( r0^2*cos^2(phi-lambda) - r0^2 + R^2 )
+                # solutions are real only if term inside sqrt is > 0
+                angle_min = ijthetas[a, 0, lr, 2]
+                angle_max = ijthetas[a, n_angles-1, lr, 2]
+                angle_inc = ijthetas[a, 1, lr, 2] - angle_min
+                if angle_min >= angle_max:
+                    raise ValueError("angles expected to be ordered from min to max.")
+                # angle_0_ref is a multiple of 2pi, the closest one smaller than angles[0]
+                # assuming a scan covers less than full circle, all angles in the scan should lie 
+                # between angle_0_ref and angle_0_ref + 2* 2pi (two full circles)
+                angle_0_ref = 2*PI * (angle_min // (2*PI))
+                for i in range(n_centers):
+                    r0sq = centers_r_sq[i]
+                    r0 = csqrt(r0sq)
+                    lmbda = centers_l[i]
+                    R = radii_ij[i]
+                    # we can first check at what angles this holds.
+                    # there should be two extrema for the circle in phi, which are solutions for:
+                    # r0^2*cos^2(phi-lambda) - r0^2 + R^2 = 0 
+                    # the two solutions are:
+                    # phi = lambda + 2*pi*n +- arccos( +- sqrt(r0^2 - R^2) / r0 )
+                    # these exist only if r0 > R and r0 != 0
+                    if centers_r_sq[i] == 0 or centers_r_sq[i] < radii_ij[i]**2:
+                        indexmin = 0
+                        indexmax = n_angles - 1
+                    else:
+                        phimin = lmbda - cacos( csqrt(r0sq - R**2) / r0 )
+                        phimax = lmbda + cacos( csqrt(r0sq - R**2) / r0 )
+                        #                    this is phi as an angle [0, 2pi]
+                        phimin = angle_0_ref + phimin % (PI * 2)
+                        phimax = angle_0_ref + phimax % (PI * 2)
+                        # try the second full circle if our agent is outside the scan
+                        if phimax < angle_min:
+                            phimin = phimin + PI * 2
+                            phimax = phimax + PI * 2
+                        # if still outside the scan, our agent is not visible
+                        if phimax < angle_min or phimin > angle_max:
+                            continue
+                        # find the index for the first visible circle point in the scan
+                        indexmin = int( ( max(phimin, angle_min) - angle_min ) // angle_inc )
+                        indexmax = int( ( min(phimax, angle_max) - angle_min ) // angle_inc )
+                    for idx in range(indexmin, indexmax+1):
+                        phi = ijthetas[a, idx, lr, 2]
+                        first_term = r0 * ccos(phi - lmbda)
+                        sqrt_inner = r0sq * ccos(phi - lmbda)**2 - r0sq + R**2
+                        if sqrt_inner < 0:
+                            # in this case that ray does not see the agent
+                            continue
+                        min_solution = ranges[a, idx, lr] # initialize with scan range
+                        possible_solution = first_term - csqrt(sqrt_inner) # in ij units
+                        possible_solution_m = possible_solution * self.resolution_ # in meters
+                        if possible_solution_m >= 0:
+                            min_solution = min(min_solution, possible_solution_m)
+                        possible_solution = first_term + csqrt(sqrt_inner)
+                        possible_solution_m = possible_solution * self.resolution_
+                        if possible_solution_m >= 0:
+                            min_solution = min(min_solution, possible_solution_m)
+                        ranges[a, idx, lr] = min_solution
+        return True
 
     @cython.boundscheck(False)
     @cython.wraparound(False)
@@ -464,11 +634,14 @@ cdef class CMap2D:
             np.ndarray[np.float32_t, ndim=1] angles,
             agents,
             np.ndarray[np.float32_t, ndim=1] lidar_ij,
+            int exclude_agent,
             ):
         """ Takes a list of agents (shapes + position) and renders them into the occupancy grid
         assumes the angles are ordered from lowest to highest, spaced evenly (const increment)
         """
-        cdef int n_centers = 2*len(agents)
+        if len(agents) == 0:
+            return True
+        cdef int n_centers = 2* (len(agents) - 1) # 2 legs per agent, one less agent (excluded)
         cdef np.float32_t[:] centers_i = np.zeros((n_centers,), dtype=np.float32)
         cdef np.float32_t[:] centers_j = np.zeros((n_centers,), dtype=np.float32)
         cdef np.float32_t[:] radii_ij = np.zeros((n_centers,), dtype=np.float32)
@@ -484,6 +657,8 @@ cdef class CMap2D:
         cdef int i2 = 0
         cdef np.float32_t leg_radius_ij
         for n in range(len(agents)):
+            if n == exclude_agent:
+                continue
             agent = agents[n]
             cagent = CSimAgent(agent.pose_2d_in_map_frame, agent.state)
             cagent.cget_legs_pose2d_in_map(left_leg_pose2d_in_map_frame, right_leg_pose2d_in_map_frame)

@@ -534,16 +534,17 @@ cdef class CMap2D:
             for lr in range(2): # apply to left / right lidar
                 # apply render agents to single lidar scan
                 k = 0
-                for n in range(n_agents):
-                    if n == a:
+                for o_a in range(n_agents):
+                    # fetch leg pos for other agents (except current)
+                    if o_a == a:
                         continue
-                    leg_radius_ij = leg_radii_ijs[k]
-                    llc_ij[0, 0] = llcijs[k, 0, 0]
-                    llc_ij[0, 1] = llcijs[k, 0, 1]
-                    llc_ij[0, 2] = llcijs[k, 0, 2]
-                    rlc_ij[0, 0] = rlcijs[k, 0, 0]
-                    rlc_ij[0, 1] = rlcijs[k, 0, 1]
-                    rlc_ij[0, 2] = rlcijs[k, 0, 2]
+                    leg_radius_ij = leg_radii_ijs[o_a]
+                    llc_ij[0, 0] = llcijs[o_a, 0, 0]
+                    llc_ij[0, 1] = llcijs[o_a, 0, 1]
+                    llc_ij[0, 2] = llcijs[o_a, 0, 2]
+                    rlc_ij[0, 0] = rlcijs[o_a, 0, 0]
+                    rlc_ij[0, 1] = rlcijs[o_a, 0, 1]
+                    rlc_ij[0, 2] = rlcijs[o_a, 0, 2]
                     # circle centers in 'lidar' frame (frame centered at lidar pos, but not rotated,
                     # as angles in array are already rotated according to sensor angle in map frame)
                     i1 = 2*k # even index, for left leg

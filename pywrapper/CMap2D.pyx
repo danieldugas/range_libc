@@ -455,11 +455,10 @@ cdef class CMap2D:
     def render_agents_in_many_lidars(self, ranges, xythetas, agents):
         self.crender_agents_in_many_lidars(ranges, xythetas, agents)
 
-    def render_agents_in_lidar(self, ranges, angles, agents, lidar_ij, exclude_agent):
-        if not self.crender_agents_in_lidar(ranges, angles.astype(np.float32), agents, lidar_ij.astype(np.float32), exclude_agent):
+    def render_agents_in_lidar(self, ranges, angles, agents, lidar_ij):
+        if not self.crender_agents_in_lidar(ranges, angles.astype(np.float32), agents, lidar_ij.astype(np.float32)):
 #             print("in rendering agents, object too close for efficient solution")
-            onelessagents = [a for i, a in enumerate(agents) if i != exclude_agent]
-            self.old_render_agents_in_lidar(ranges, angles, onelessagents, lidar_ij)
+            self.old_render_agents_in_lidar(ranges, angles, agents, lidar_ij)
 
     @cython.boundscheck(False)
     @cython.wraparound(False)
@@ -634,14 +633,13 @@ cdef class CMap2D:
             np.ndarray[np.float32_t, ndim=1] angles,
             agents,
             np.ndarray[np.float32_t, ndim=1] lidar_ij,
-            int exclude_agent,
             ):
         """ Takes a list of agents (shapes + position) and renders them into the occupancy grid
         assumes the angles are ordered from lowest to highest, spaced evenly (const increment)
         """
         if len(agents) == 0:
             return True
-        cdef int n_centers = 2* (len(agents) - 1) # 2 legs per agent, one less agent (excluded)
+        cdef int n_centers = 2* len(agents)
         cdef np.float32_t[:] centers_i = np.zeros((n_centers,), dtype=np.float32)
         cdef np.float32_t[:] centers_j = np.zeros((n_centers,), dtype=np.float32)
         cdef np.float32_t[:] radii_ij = np.zeros((n_centers,), dtype=np.float32)
@@ -657,8 +655,6 @@ cdef class CMap2D:
         cdef int i2 = 0
         cdef np.float32_t leg_radius_ij
         for n in range(len(agents)):
-            if n == exclude_agent:
-                continue
             agent = agents[n]
             cagent = CSimAgent(agent.pose_2d_in_map_frame, agent.state)
             cagent.cget_legs_pose2d_in_map(left_leg_pose2d_in_map_frame, right_leg_pose2d_in_map_frame)
@@ -803,9 +799,9 @@ cdef class CSimAgent:
         right_leg_pose2d_in_agent_frame[0, 1] = side_travel + leg_side_offset
         right_leg_pose2d_in_agent_frame[0, 2] = 0
         cdef np.float32_t[:, ::1] left_leg_pose2d_in_agent_frame = np.zeros((1,3), dtype=np.float32) 
-        right_leg_pose2d_in_agent_frame[0, 0] = -right_leg_pose2d_in_agent_frame[0, 0]
-        right_leg_pose2d_in_agent_frame[0, 1] = -right_leg_pose2d_in_agent_frame[0, 1]
-        right_leg_pose2d_in_agent_frame[0, 2] = -right_leg_pose2d_in_agent_frame[0, 2]
+        left_leg_pose2d_in_agent_frame[0, 0] = -1 * right_leg_pose2d_in_agent_frame[0, 0]
+        left_leg_pose2d_in_agent_frame[0, 1] = -1 * right_leg_pose2d_in_agent_frame[0, 1]
+        left_leg_pose2d_in_agent_frame[0, 2] = -1 * right_leg_pose2d_in_agent_frame[0, 2]
         capply_tf_to_pose(
                 left_leg_pose2d_in_agent_frame, m_a_T, left_leg_pose2d_in_map_frame)
         capply_tf_to_pose(

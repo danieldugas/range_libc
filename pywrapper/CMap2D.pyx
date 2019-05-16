@@ -481,20 +481,12 @@ cdef class CMap2D:
         if n_agents == 0:
             return True
         cdef int n_centers = 2* (n_agents - 1) # 2 legs per agent, one less agent (excluded)
-        cdef np.float32_t[:] centers_i = np.zeros((n_centers,), dtype=np.float32)
-        cdef np.float32_t[:] centers_j = np.zeros((n_centers,), dtype=np.float32)
-        cdef np.float32_t[:] radii_ij = np.zeros((n_centers,), dtype=np.float32)
-        cdef np.float32_t[:] centers_r_sq = np.zeros((n_centers,), dtype=np.float32)
-        cdef np.float32_t[:] centers_l = np.zeros((n_centers,), dtype=np.float32)
         # loop variables
         cdef CSimAgent cagent
         cdef np.float32_t[:, ::1] left_leg_pose2d_in_map_frame = np.zeros((1,3), dtype=np.float32)
         cdef np.float32_t[:, ::1] right_leg_pose2d_in_map_frame = np.zeros((1,3), dtype=np.float32)
         cdef np.float32_t[:, ::1] llc_ij = np.zeros((1,3), dtype=np.float32)
         cdef np.float32_t[:, ::1] rlc_ij = np.zeros((1,3), dtype=np.float32)
-        cdef int i1 = 0
-        cdef int i2 = 0
-        cdef np.float32_t leg_radius_ij
         cdef np.float32_t[:, :, ::1] llcijs = np.zeros((n_agents, 1, 3), dtype=np.float32)
         cdef np.float32_t[:, :, ::1] rlcijs = np.zeros((n_agents, 1, 3), dtype=np.float32)
         cdef np.float32_t[:] leg_radii_ijs  = np.zeros((n_agents,), dtype=np.float32)
@@ -511,27 +503,35 @@ cdef class CMap2D:
             rlcijs[n, 0, 0] = rlc_ij[0, 0]
             rlcijs[n, 0, 1] = rlc_ij[0, 1]
             rlcijs[n, 0, 2] = rlc_ij[0, 2]
-        # final calculation cdefs
-        cdef np.float32_t angle_min
-        cdef np.float32_t angle_max
-        cdef np.float32_t angle_inc
-        cdef np.float32_t angle_0_ref
-        cdef np.float32_t r0sq
-        cdef np.float32_t r0
-        cdef np.float32_t lmbda
-        cdef np.float32_t R
-        cdef np.float32_t phimin
-        cdef np.float32_t phimax
-        cdef np.float32_t phi
-        cdef np.float32_t first_term
-        cdef np.float32_t sqrt_inner
-        cdef np.float32_t min_solution
-        cdef np.float32_t possible_solution
-        cdef np.float32_t possible_solution_m
-        cdef int indexmin
-        cdef int indexmax
-        cdef int k
-        cdef bool wholescan = False
+        # middle loop variables
+        cdef int[:] i1 = np.zeros((n_agents,), dtype=np.int32)
+        cdef int[:] i2 = np.zeros((n_agents,), dtype=np.int32)
+        cdef np.float32_t leg_radius_ij
+        cdef np.float32_t[:, ::1] centers_i    = np.zeros((n_agents, n_centers,), dtype=np.float32)
+        cdef np.float32_t[:, ::1] centers_j    = np.zeros((n_agents, n_centers,), dtype=np.float32)
+        cdef np.float32_t[:, ::1] radii_ij     = np.zeros((n_agents, n_centers,), dtype=np.float32)
+        cdef np.float32_t[:, ::1] centers_r_sq = np.zeros((n_agents, n_centers,), dtype=np.float32)
+        cdef np.float32_t[:, ::1] centers_l    = np.zeros((n_agents, n_centers,), dtype=np.float32)
+        # innermost loop final calculation cdefs
+        cdef np.float32_t[:] angle_min = np.zeros((n_agents,), dtype=np.float32)
+        cdef np.float32_t[:] angle_max = np.zeros((n_agents,), dtype=np.float32)
+        cdef np.float32_t[:] angle_inc = np.zeros((n_agents,), dtype=np.float32)
+        cdef np.float32_t[:] angle_0_ref = np.zeros((n_agents,), dtype=np.float32)
+        cdef np.float32_t[:] r0sq = np.zeros((n_agents,), dtype=np.float32)
+        cdef np.float32_t[:] r0 = np.zeros((n_agents,), dtype=np.float32)
+        cdef np.float32_t[:] lmbda = np.zeros((n_agents,), dtype=np.float32)
+        cdef np.float32_t[:] R = np.zeros((n_agents,), dtype=np.float32)
+        cdef np.float32_t[:] phimin = np.zeros((n_agents,), dtype=np.float32)
+        cdef np.float32_t[:] phimax = np.zeros((n_agents,), dtype=np.float32)
+        cdef np.float32_t[:] phi = np.zeros((n_agents,), dtype=np.float32)
+        cdef np.float32_t[:] first_term = np.zeros((n_agents,), dtype=np.float32)
+        cdef np.float32_t[:] sqrt_inner = np.zeros((n_agents,), dtype=np.float32)
+        cdef np.float32_t[:] min_solution = np.zeros((n_agents,), dtype=np.float32)
+        cdef np.float32_t[:] possible_solution = np.zeros((n_agents,), dtype=np.float32)
+        cdef np.float32_t[:] possible_solution_m = np.zeros((n_agents,), dtype=np.float32)
+        cdef int[:] indexmin = np.zeros((n_agents,), dtype=np.int32)
+        cdef int[:] indexmax = np.zeros((n_agents,), dtype=np.int32)
+        cdef int[:] k = np.zeros((n_agents,), dtype=np.int32)
         cdef int a
         cdef int lr
         cdef int o_a
@@ -540,97 +540,91 @@ cdef class CMap2D:
         for a in prange(n_agents, nogil=True): # apply to each agent
             for lr in range(2): # apply to left / right lidar
                 # apply render agents to single lidar scan
-                k = 0
+                k[a] = 0
                 for o_a in range(n_agents):
                     # fetch leg pos for other agents (except current)
                     if o_a == a:
                         continue
                     leg_radius_ij = leg_radii_ijs[o_a]
-                    llc_ij[0, 0] = llcijs[o_a, 0, 0]
-                    llc_ij[0, 1] = llcijs[o_a, 0, 1]
-                    llc_ij[0, 2] = llcijs[o_a, 0, 2]
-                    rlc_ij[0, 0] = rlcijs[o_a, 0, 0]
-                    rlc_ij[0, 1] = rlcijs[o_a, 0, 1]
-                    rlc_ij[0, 2] = rlcijs[o_a, 0, 2]
                     # circle centers in 'lidar' frame (frame centered at lidar pos, but not rotated,
                     # as angles in array are already rotated according to sensor angle in map frame)
-                    i1 = 2*k # even index, for left leg
-                    i2 = 2*k+1 # odd index for right leg
-                    centers_i[i1] = llc_ij[0, 0] - ijthetas[a, 0, lr, 0]
-                    centers_j[i1] = llc_ij[0, 1] - ijthetas[a, 0, lr, 1]
-                    radii_ij[i1] = leg_radius_ij
-                    centers_i[i2] = rlc_ij[0, 0] - ijthetas[a, 0, lr, 0]
-                    centers_j[i2] = rlc_ij[0, 1] - ijthetas[a, 0, lr, 1]
-                    radii_ij[i2] = leg_radius_ij
+                    i1[a] = 2*k[a] # even index, for left leg
+                    i2[a] = 2*k[a]+1 # odd index for right leg
+                    centers_i[a, i1[a]] = llcijs[o_a, 0, 0] - ijthetas[a, 0, lr, 0]
+                    centers_j[a, i1[a]] = llcijs[o_a, 0, 1] - ijthetas[a, 0, lr, 1]
+                    radii_ij[a, i1[a]] = leg_radius_ij
+                    centers_i[a, i2[a]] = rlcijs[o_a, 0, 0] - ijthetas[a, 0, lr, 0]
+                    centers_j[a, i2[a]] = rlcijs[o_a, 0, 1] - ijthetas[a, 0, lr, 1]
+                    radii_ij[a, i2[a]] = leg_radius_ij
                     # switch to polar coordinate to find intersection between each ray and agent (circles)
-                    centers_r_sq[i1] = centers_i[i1]**2 + centers_j[i1]**2
-                    centers_l[i1] = catan2(centers_j[i1], centers_i[i1])
-                    centers_r_sq[i2] = centers_i[i2]**2 + centers_j[i2]**2
-                    centers_l[i2] = catan2(centers_j[i2], centers_i[i2])
-                    k = k + 1
-                # Circle in polar coord: r^2 - 2*r*r0*cos(phi-lambda) + r0^2 = R^2
-                # Solve equation for r at angle phi in polar coordinates, of circle of center (r0, lambda)
-                # and radius R. -> 2 solutions for r knowing r0, phi, lambda, R: 
-                # r = r0*cos(phi-lambda) - sqrt( r0^2*cos^2(phi-lambda) - r0^2 + R^2 )
-                # r = r0*cos(phi-lambda) + sqrt( r0^2*cos^2(phi-lambda) - r0^2 + R^2 )
+                    centers_r_sq[a, i1[a]] = centers_i[a, i1[a]]**2 + centers_j[a, i1[a]]**2
+                    centers_l[a, i1[a]] = catan2(centers_j[a, i1[a]], centers_i[a, i1[a]])
+                    centers_r_sq[a, i2[a]] = centers_i[a, i2[a]]**2 + centers_j[a, i2[a]]**2
+                    centers_l[a, i2[a]] = catan2(centers_j[a, i2[a]], centers_i[a, i2[a]])
+                    k[a] = k[a] + 1
+                # Circle in polar coord: r^2 - 2*r*r0[a]*cos(phi[a]-lambda) + r0[a]^2 = R[a]^2
+                # Solve equation for r at angle phi[a] in polar coordinates, of circle of center (r0[a], lambda)
+                # and radius R[a]. -> 2 solutions for r knowing r0[a], phi[a], lambda, R[a]: 
+                # r = r0[a]*cos(phi[a]-lambda) - sqrt( r0[a]^2*cos^2(phi[a]-lambda) - r0[a]^2 + R[a]^2 )
+                # r = r0[a]*cos(phi[a]-lambda) + sqrt( r0[a]^2*cos^2(phi[a]-lambda) - r0[a]^2 + R[a]^2 )
                 # solutions are real only if term inside sqrt is > 0
-                angle_min = ijthetas[a, 0, lr, 2]
-                angle_max = ijthetas[a, n_angles-1, lr, 2]
-                angle_inc = ijthetas[a, 1, lr, 2] - angle_min
-                if angle_min >= angle_max:
+                angle_min[a] = ijthetas[a, 0, lr, 2]
+                angle_max[a] = ijthetas[a, n_angles-1, lr, 2]
+                angle_inc[a] = ijthetas[a, 1, lr, 2] - angle_min[a]
+                if angle_min[a] >= angle_max[a]:
                     with gil:
                         raise ValueError("angles expected to be ordered from min to max.")
                 # angle_0_ref is a multiple of 2pi, the closest one smaller than angles[0]
                 # assuming a scan covers less than full circle, all angles in the scan should lie 
                 # between angle_0_ref and angle_0_ref + 2* 2pi (two full circles)
-                angle_0_ref = 2*PI * (angle_min // (2*PI))
+                angle_0_ref[a] = 2*PI * (angle_min[a] // (2*PI))
                 for i in range(n_centers):
-                    r0sq = centers_r_sq[i]
-                    r0 = csqrt(r0sq)
-                    lmbda = centers_l[i]
-                    R = radii_ij[i]
+                    r0sq[a] = centers_r_sq[a, i]
+                    r0[a] = csqrt(r0sq[a])
+                    lmbda[a] = centers_l[a, i]
+                    R[a] = radii_ij[a, i]
                     # we can first check at what angles this holds.
-                    # there should be two extrema for the circle in phi, which are solutions for:
-                    # r0^2*cos^2(phi-lambda) - r0^2 + R^2 = 0 
+                    # there should be two extrema for the circle in phi[a], which are solutions for:
+                    # r0[a]^2*cos^2(phi[a]-lambda) - r0[a]^2 + R[a]^2 = 0 
                     # the two solutions are:
-                    # phi = lambda + 2*pi*n +- arccos( +- sqrt(r0^2 - R^2) / r0 )
-                    # these exist only if r0 > R and r0 != 0
-                    if centers_r_sq[i] == 0 or centers_r_sq[i] < radii_ij[i]**2:
-                        indexmin = 0
-                        indexmax = n_angles - 1
+                    # phi[a] = lambda + 2*pi*n +- arccos( +- sqrt(r0[a]^2 - R[a]^2) / r0[a] )
+                    # these exist only if r0[a] > R[a] and r0[a] != 0
+                    if centers_r_sq[a, i] == 0 or centers_r_sq[a, i] < radii_ij[a, i]**2:
+                        indexmin[a] = 0
+                        indexmax[a] = n_angles - 1
                     else:
-                        phimin = lmbda - cacos( csqrt(r0sq - R**2) / r0 )
-                        phimax = lmbda + cacos( csqrt(r0sq - R**2) / r0 )
-                        #                    this is phi as an angle [0, 2pi]
-                        phimin = angle_0_ref + phimin % (PI * 2)
-                        phimax = angle_0_ref + phimax % (PI * 2)
+                        phimin[a] = lmbda[a] - cacos( csqrt(r0sq[a] - R[a]**2) / r0[a] )
+                        phimax[a] = lmbda[a] + cacos( csqrt(r0sq[a] - R[a]**2) / r0[a] )
+                        #                    this is phi[a] as an angle [0, 2pi]
+                        phimin[a] = angle_0_ref[a] + phimin[a] % (PI * 2)
+                        phimax[a] = angle_0_ref[a] + phimax[a] % (PI * 2)
                         # try the second full circle if our agent is outside the scan
-                        if phimax < angle_min:
-                            phimin = phimin + PI * 2
-                            phimax = phimax + PI * 2
+                        if phimax[a] < angle_min[a]:
+                            phimin[a] = phimin[a] + PI * 2
+                            phimax[a] = phimax[a] + PI * 2
                         # if still outside the scan, our agent is not visible
-                        if phimax < angle_min or phimin > angle_max:
+                        if phimax[a] < angle_min[a] or phimin[a] > angle_max[a]:
                             continue
                         # find the index for the first visible circle point in the scan
-                        indexmin = int( ( max(phimin, angle_min) - angle_min ) // angle_inc )
-                        indexmax = int( ( min(phimax, angle_max) - angle_min ) // angle_inc )
-                    for idx in range(indexmin, indexmax+1):
-                        phi = ijthetas[a, idx, lr, 2]
-                        first_term = r0 * ccos(phi - lmbda)
-                        sqrt_inner = r0sq * ccos(phi - lmbda)**2 - r0sq + R**2
-                        if sqrt_inner < 0:
+                        indexmin[a] = int( ( max(phimin[a], angle_min[a]) - angle_min[a] ) // angle_inc[a] )
+                        indexmax[a] = int( ( min(phimax[a], angle_max[a]) - angle_min[a] ) // angle_inc[a] )
+                    for idx in range(indexmin[a], indexmax[a]+1):
+                        phi[a] = ijthetas[a, idx, lr, 2]
+                        first_term[a] = r0[a] * ccos(phi[a] - lmbda[a])
+                        sqrt_inner[a] = r0sq[a] * ccos(phi[a] - lmbda[a])**2 - r0sq[a] + R[a]**2
+                        if sqrt_inner[a] < 0:
                             # in this case that ray does not see the agent
                             continue
-                        min_solution = ranges[a, idx, lr] # initialize with scan range
-                        possible_solution = first_term - csqrt(sqrt_inner) # in ij units
-                        possible_solution_m = possible_solution * self.resolution_ # in meters
-                        if possible_solution_m >= 0:
-                            min_solution = min(min_solution, possible_solution_m)
-                        possible_solution = first_term + csqrt(sqrt_inner)
-                        possible_solution_m = possible_solution * self.resolution_
-                        if possible_solution_m >= 0:
-                            min_solution = min(min_solution, possible_solution_m)
-                        ranges[a, idx, lr] = min_solution
+                        min_solution[a] = ranges[a, idx, lr] # initialize with scan range
+                        possible_solution[a] = first_term[a] - csqrt(sqrt_inner[a]) # in ij units
+                        possible_solution_m[a] = possible_solution[a] * self.resolution_ # in meters
+                        if possible_solution_m[a] >= 0:
+                            min_solution[a] = min(min_solution[a], possible_solution_m[a])
+                        possible_solution[a] = first_term[a] + csqrt(sqrt_inner[a])
+                        possible_solution_m[a] = possible_solution[a] * self.resolution_
+                        if possible_solution_m[a] >= 0:
+                            min_solution[a] = min(min_solution[a], possible_solution_m[a])
+                        ranges[a, idx, lr] = min_solution[a]
         return True
 
     @cython.boundscheck(False)

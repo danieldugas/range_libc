@@ -6,11 +6,13 @@ from libcpp.vector cimport vector
 import numpy as np
 cimport numpy as np
 from cython.operator cimport dereference as deref
+from cython.parallel import prange
 cimport cython
 from math import sqrt
 from libc.math cimport cos as ccos
 from libc.math cimport sin as csin
 from libc.math cimport acos as cacos
+from libc.math cimport atan2 as catan2
 from libc.math cimport sqrt as csqrt
 
 import os
@@ -530,7 +532,12 @@ cdef class CMap2D:
         cdef int indexmax
         cdef int k
         cdef bool wholescan = False
-        for a in range(n_agents): # apply to each agent
+        cdef int a
+        cdef int lr
+        cdef int o_a
+        cdef int i
+        cdef int idx
+        for a in prange(n_agents, nogil=True): # apply to each agent
             for lr in range(2): # apply to left / right lidar
                 # apply render agents to single lidar scan
                 k = 0
@@ -557,10 +564,10 @@ cdef class CMap2D:
                     radii_ij[i2] = leg_radius_ij
                     # switch to polar coordinate to find intersection between each ray and agent (circles)
                     centers_r_sq[i1] = centers_i[i1]**2 + centers_j[i1]**2
-                    centers_l[i1] = np.arctan2(centers_j[i1], centers_i[i1])
+                    centers_l[i1] = catan2(centers_j[i1], centers_i[i1])
                     centers_r_sq[i2] = centers_i[i2]**2 + centers_j[i2]**2
-                    centers_l[i2] = np.arctan2(centers_j[i2], centers_i[i2])
-                    k += 1
+                    centers_l[i2] = catan2(centers_j[i2], centers_i[i2])
+                    k = k + 1
                 # Circle in polar coord: r^2 - 2*r*r0*cos(phi-lambda) + r0^2 = R^2
                 # Solve equation for r at angle phi in polar coordinates, of circle of center (r0, lambda)
                 # and radius R. -> 2 solutions for r knowing r0, phi, lambda, R: 
@@ -571,7 +578,8 @@ cdef class CMap2D:
                 angle_max = ijthetas[a, n_angles-1, lr, 2]
                 angle_inc = ijthetas[a, 1, lr, 2] - angle_min
                 if angle_min >= angle_max:
-                    raise ValueError("angles expected to be ordered from min to max.")
+                    with gil:
+                        raise ValueError("angles expected to be ordered from min to max.")
                 # angle_0_ref is a multiple of 2pi, the closest one smaller than angles[0]
                 # assuming a scan covers less than full circle, all angles in the scan should lie 
                 # between angle_0_ref and angle_0_ref + 2* 2pi (two full circles)

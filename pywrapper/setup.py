@@ -98,7 +98,7 @@ include_dirs = ["../", numpy_include]
 depends = ["../includes/*.h"]
 sources = ["RangeLibc.pyx","../vendor/lodepng/lodepng.cpp"]
 
-CHUNK_SIZE = "262144"
+CHUNK_SIZE = "162200"
 NUM_THREADS = "256"
 
 if use_cuda:

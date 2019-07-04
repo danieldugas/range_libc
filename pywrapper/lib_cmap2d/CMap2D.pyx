@@ -17,7 +17,6 @@ import os
 from yaml import load
 from matplotlib.pyplot import imread
 
-import pose2d
 
 cdef class CMap2D:
     cdef public np.float32_t[:,::1] occupancy_ # [:, ::1] means 2d c-contiguous
@@ -332,7 +331,7 @@ cdef class CMap2D:
         return coarse
 
 
-    def dijkstra(self, goal_ij, mask=None, extra_costs=None):
+    def dijkstra(self, goal_ij, mask=None, extra_costs=None, inv_value=None):
         kEdgeLength = 1 * self.resolution_  # meters
         # Initialize bool arrays
         open_ = np.ones((self.occupancy_shape0, self.occupancy_shape1), dtype=np.bool)
@@ -345,7 +344,9 @@ cdef class CMap2D:
         if extra_costs is None:
             extra_costs = np.zeros((self.occupancy_shape0, self.occupancy_shape1))
         # initialize field to large value
-        tentative = np.ones((self.occupancy_shape0, self.occupancy_shape1)) * self.HUGE_
+        if inv_value is None:
+            inv_value = self.HUGE_
+        tentative = np.ones((self.occupancy_shape0, self.occupancy_shape1)) * inv_value
         # Start at the goal location
         tentative[tuple(goal_ij)] = 0
         to_visit = [goal_ij]
@@ -396,7 +397,8 @@ cdef class CMap2D:
                 new_cost = (
                     tentative[current[0], current[1]] + kEdgeLength + edge_extra_costs
                 )
-                if new_cost < tentative[neighbor_idx[0], neighbor_idx[1]]:
+                old_cost = tentative[neighbor_idx[0], neighbor_idx[1]]
+                if new_cost < old_cost or old_cost == inv_value:
                     tentative[neighbor_idx[0], neighbor_idx[1]] = new_cost
                 # Add neighbors to to_visit if not already present
                 if not_in_to_visit[neighbor_idx[0], neighbor_idx[1]]:
@@ -756,7 +758,6 @@ cdef class CMap2D:
                 ranges[idx] = min_solution
         return True
 
-import pose2d
 
 cdef class CSimAgent:
     cdef public np.float32_t[:] pose_2d_in_map_frame
@@ -830,9 +831,9 @@ cdef class CSimAgent:
                 side_travel + leg_side_offset,
                 0])
             left_leg_pose2d_in_agent_frame =  -right_leg_pose2d_in_agent_frame
-            left_leg_pose2d_in_map_frame = pose2d.apply_tf_to_pose(
+            left_leg_pose2d_in_map_frame = apply_tf_to_pose(
                     left_leg_pose2d_in_agent_frame, m_a_T)
-            right_leg_pose2d_in_map_frame = pose2d.apply_tf_to_pose(
+            right_leg_pose2d_in_map_frame = apply_tf_to_pose(
                     right_leg_pose2d_in_agent_frame, m_a_T)
             return left_leg_pose2d_in_map_frame, right_leg_pose2d_in_map_frame
         else:
@@ -847,4 +848,37 @@ cdef capply_tf_to_pose(np.float32_t[:, ::1] pose, np.float32_t[:] pose2d,
     result[0, 0] = ccos(th) * pose[0, 0] - csin(th) * pose[0, 1] + pose2d[0]
     result[0, 1] = csin(th) * pose[0, 0] + ccos(th) * pose[0, 1] + pose2d[1]
     result[0, 2] = pose[0, 2] + th
+
+def apply_tf(x, pose2d):
+    # x is in frame B
+    # pose2d is AT_B
+    # result is x in frame A
+    return rotate(x, pose2d[2]) + np.array(pose2d[:2])
+
+def apply_tf_to_pose(pose, pose2d):
+    # same as apply_tf but assumes pose is x y theta instead of x y
+    xy = rotate(np.array([pose[:2]]), pose2d[2])[0] + np.array(pose2d[:2])
+    th = pose[2] + pose2d[2]
+    return np.array([xy[0], xy[1], th])
+
+def apply_tf_to_vel(vel, pose2d):
+    # same as apply_tf but assumes vel is xdot ydot thetadot instead of x y
+    # for xdot ydot frame transformation applies, 
+    # but thetadot is invariant due to frames being fixed.
+    xy = rotate(np.array([vel[...,:2]]), pose2d[2])[0]
+    th = vel[...,2]
+    return np.array([xy[0], xy[1], th])
+
+def rotate(x, th):
+    rotmat = np.array([
+        [np.cos(th), -np.sin(th)],
+        [np.sin(th), np.cos(th)],
+        ])
+    return np.matmul(rotmat, x.T).T
+
+def inverse_pose2d(pose2d):
+    inv_th = -pose2d[2] # theta
+    inv_xy = rotate(np.array([-pose2d[:2]]), inv_th)[0]
+    return np.array([inv_xy[0], inv_xy[1], inv_th])
+
 

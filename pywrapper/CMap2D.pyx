@@ -455,19 +455,13 @@ cdef class CMap2D:
     def render_agents_in_many_lidars(self, ranges, xythetas, agents):
         self.crender_agents_in_many_lidars(ranges, xythetas, agents)
 
-    def render_agents_in_lidar(self, ranges, angles, agents, lidar_ij):
-        if not self.crender_agents_in_lidar(ranges, angles.astype(np.float32), agents, lidar_ij.astype(np.float32)):
-#             print("in rendering agents, object too close for efficient solution")
-            self.old_render_agents_in_lidar(ranges, angles, agents, lidar_ij)
-
     @cython.boundscheck(False)
     @cython.wraparound(False)
     @cython.nonecheck(False)
     @cython.cdivision(True)
     cdef crender_agents_in_many_lidars(self,
-#             np.float32_t[:,:,::1] ranges,   # agent, points, left / right
-            np.ndarray[np.float32_t, ndim=3, mode='c'] ranges,   # agent, points, left / right
-            np.float32_t[:,:,:,::1] ijthetas, # agent, points, left / right, i j th
+            np.ndarray[np.float32_t, ndim=3, mode='c'] ranges,   # agent, points, n_lidars_p_agent
+            np.float32_t[:,:,:,::1] ijthetas, # agent, points, n_lidars_p_agent, i j th
             agents,
             ):
         """ Takes a list of agents (shapes + position) and renders them into the occupancy grid
@@ -476,6 +470,7 @@ cdef class CMap2D:
         cdef np.float32_t PI = np.pi
         cdef int n_agents = len(agents)
         cdef int n_angles = ijthetas.shape[1]
+        cdef int n_lidars_per_agent = ijthetas.shape[2]
         if n_agents == 0:
             return True
         cdef int n_centers = 2* (n_agents - 1) # 2 legs per agent, one less agent (excluded)
@@ -531,7 +526,7 @@ cdef class CMap2D:
         cdef int k
         cdef bool wholescan = False
         for a in range(n_agents): # apply to each agent
-            for lr in range(2): # apply to left / right lidar
+            for lr in range(n_lidars_per_agent): # apply to left / right lidar
                 # apply render agents to single lidar scan
                 k = 0
                 for o_a in range(n_agents):
@@ -624,6 +619,11 @@ cdef class CMap2D:
                             min_solution = min(min_solution, possible_solution_m)
                         ranges[a, idx, lr] = min_solution
         return True
+
+    def render_agents_in_lidar(self, ranges, angles, agents, lidar_ij):
+        if not self.crender_agents_in_lidar(ranges, angles.astype(np.float32), agents, lidar_ij.astype(np.float32)):
+#             print("in rendering agents, object too close for efficient solution")
+            self.old_render_agents_in_lidar(ranges, angles, agents, lidar_ij)
 
     @cython.boundscheck(False)
     @cython.wraparound(False)

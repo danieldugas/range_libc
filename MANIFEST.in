@@ -1,0 +1,7 @@
+include includes/*
+include pywrapper/RangeLibc.pyx
+include CMakeLists.txt
+include vendor/distance_transform.h
+include vendor/lodepng/*
+include vendor/gflags/**
+
